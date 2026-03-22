@@ -9,7 +9,7 @@ export function useAgentWorkflow() {
   const reportReady = ref(false)
 
   function addStep(step) {
-    steps.value.push({ ...step, id: Date.now() + Math.random() })
+    steps.value.push({ ...step, id: Date.now() + Math.random(), cards: [] })
   }
 
   function updateLastStep(patch) {
@@ -21,6 +21,16 @@ export function useAgentWorkflow() {
     return new Promise(r => setTimeout(r, ms))
   }
 
+  // 逐条追加 card，模拟 AI 逐步输出
+  async function pushCards(cards, interval = 500) {
+    const last = steps.value[steps.value.length - 1]
+    if (!last) return
+    for (const card of cards) {
+      last.cards.push(card)
+      await delay(interval)
+    }
+  }
+
   async function runWorkflow(ship, selectedRoutes, onRoutesReady) {
     isRunning.value = true
     steps.value = []
@@ -28,59 +38,60 @@ export function useAgentWorkflow() {
     recommendation.value = null
     reportReady.value = false
 
-    // Step 1: 任务解析
+    // Step 1: 任务解析（思考 1.8s，再逐条输出结果）
     addStep({
       index: 1,
       title: '任务解析与航路识别',
       status: 'running',
       tools: ['task_parser', 'region_resolver'],
       dataSource: ['船舶基础数据库', '航路信息库', '任务参数解析器'],
-      cards: null
     })
-    await delay(900)
-    updateLastStep({
-      status: 'done',
-      cards: [
-        { label: '选定船舶', value: ship.name },
-        { label: '候选航路', value: selectedRoutes.map(r => r.name).join(' / ') },
-        { label: '分析模式', value: '多航路比选 + 风险评估' }
-      ]
-    })
+    await delay(1800)
+    await pushCards([
+      { label: '选定船舶', value: ship.name },
+      { label: '候选航路', value: selectedRoutes.map(r => r.name).join(' / ') },
+      { label: '分析模式', value: '多航路比选 + 风险评估' }
+    ], 480)
+    updateLastStep({ status: 'done' })
 
-    // Step 2: 调用算法接口
+    // Step 2: 调用算法接口（真实 fetch + 补足等待感）
     addStep({
       index: 2,
       title: '调用航路评估算法',
       status: 'running',
       tools: ['route_algorithm', 'weather_fetcher'],
       dataSource: ['气象预报模型', '海浪数值模型', '洋流数据库', '能见度观测网'],
-      cards: null
     })
-    const results = {}
-    for (const route of selectedRoutes) {
-      const data = await callRouteAlgorithm(ship.id, route.id)
-      results[route.id] = data
-    }
+    const [results] = await Promise.all([
+      (async () => {
+        const r = {}
+        for (const route of selectedRoutes) {
+          r[route.id] = await callRouteAlgorithm(ship.id, route.id)
+        }
+        return r
+      })(),
+      delay(2200)   // 至少等 2.2s，让"计算感"足够
+    ])
     routeResults.value = results
     if (onRoutesReady) onRoutesReady(results)
-    updateLastStep({
-      status: 'done',
-      cards: selectedRoutes.map(r => ({
+    await pushCards(
+      selectedRoutes.map(r => ({
         label: r.name,
         value: `${results[r.id]?.content?.length || 0} 个关键航点，${results[r.id]?.coordinates?.length || 0} 个轨迹点`
-      }))
-    })
+      })),
+      550
+    )
+    updateLastStep({ status: 'done' })
 
-    // Step 3: 风险分析
+    // Step 3: 风险分析（思考 2.4s）
     addStep({
       index: 3,
       title: '风险段识别与评估',
       status: 'running',
       tools: ['risk_analyzer', 'segment_classifier'],
       dataSource: ['weatherWarn 风险字段', '风速/浪高/能见度阈值库'],
-      cards: null
     })
-    await delay(700)
+    await delay(2400)
 
     const riskSummary = {}
     for (const route of selectedRoutes) {
@@ -93,30 +104,29 @@ export function useAgentWorkflow() {
       riskSummary[route.id] = { highRisk, midRisk, maxWarn, maxWave, maxWind }
     }
 
-    updateLastStep({
-      status: 'done',
-      cards: selectedRoutes.map(r => {
+    await pushCards(
+      selectedRoutes.map(r => {
         const s = riskSummary[r.id]
         const risk = getRiskLevel(s.maxWarn)
         return {
           label: r.name,
           value: `最高${risk.label}，高风险点 ${s.highRisk} 个，峰值浪高 ${s.maxWave.toFixed(1)}m`
         }
-      })
-    })
+      }),
+      600
+    )
+    updateLastStep({ status: 'done' })
 
-    // Step 4: 比选推荐
+    // Step 4: 比选推荐（思考 2s）
     addStep({
       index: 4,
       title: '多航路比选与推荐',
       status: 'running',
       tools: ['route_comparator', 'recommendation_engine'],
       dataSource: ['各航路风险汇总', '时效性评估模型', '运营可行性规则库'],
-      cards: null
     })
-    await delay(600)
+    await delay(2000)
 
-    // Pick recommendation: lowest high-risk count, then lowest maxWarn
     const sorted = selectedRoutes.slice().sort((a, b) => {
       const sa = riskSummary[a.id], sb = riskSummary[b.id]
       if (sa.highRisk !== sb.highRisk) return sa.highRisk - sb.highRisk
@@ -129,32 +139,27 @@ export function useAgentWorkflow() {
       reason: `${rec.name}高风险点最少(${riskSummary[rec.id].highRisk}个)，综合安全性最优，兼顾时效与运营可行性。`
     }
 
-    updateLastStep({
-      status: 'done',
-      cards: [
-        { label: '推荐航路', value: rec.name, highlight: true },
-        { label: '推荐理由', value: recommendation.value.reason }
-      ]
-    })
+    await pushCards([
+      { label: '推荐航路', value: rec.name, highlight: true },
+      { label: '推荐理由', value: recommendation.value.reason }
+    ], 700)
+    updateLastStep({ status: 'done' })
 
-    // Step 5: 报告生成
+    // Step 5: 报告生成（思考 1.8s）
     addStep({
       index: 5,
       title: '生成航线决策报告',
       status: 'running',
       tools: ['report_generator'],
       dataSource: ['风险分析结果', '比选结论', '气象数据摘要', '可视化图表'],
-      cards: null
     })
-    await delay(800)
+    await delay(1800)
     reportReady.value = true
-    updateLastStep({
-      status: 'done',
-      cards: [
-        { label: '报告章节', value: '总体态势 / 风险段分析 / 气象数据 / 操作建议' },
-        { label: '状态', value: '报告已生成，可查看', highlight: true }
-      ]
-    })
+    await pushCards([
+      { label: '报告章节', value: '总体态势 / 风险段分析 / 气象数据 / 操作建议' },
+      { label: '状态', value: '报告已生成，可查看', highlight: true }
+    ], 600)
+    updateLastStep({ status: 'done' })
 
     isRunning.value = false
     return { routeResults: results, recommendation: recommendation.value, riskSummary }
@@ -162,3 +167,4 @@ export function useAgentWorkflow() {
 
   return { steps, isRunning, routeResults, recommendation, reportReady, runWorkflow }
 }
+
