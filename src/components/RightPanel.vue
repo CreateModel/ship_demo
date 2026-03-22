@@ -300,11 +300,6 @@ function parseIntent(text) {
 }
 
 async function callQwen(text) {
-  const apiKey = import.meta.env.VITE_DASHSCOPE_API_KEY
-  if (!apiKey) {
-    return '我识别不到明确的船型/航线操作。你可以继续说“勾选01船型第三条航线”或“评估01船型第三条航线的风险”。\n如果要闲聊，请先在环境变量配置 VITE_DASHSCOPE_API_KEY。'
-  }
-
   const history = chatMessages.value.slice(-8).map(m => ({ role: m.role, content: m.content }))
   const messages = [
     { role: 'system', content: '你是智能助手。若用户问题与航运系统无关（如讲笑话、闲聊、常识问答），直接正常回答。回答简洁自然。' },
@@ -312,17 +307,10 @@ async function callQwen(text) {
     { role: 'user', content: text }
   ]
 
-  const res = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+  const res = await fetch('/api/chat', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: 'qwen-plus',
-      messages,
-      stream: false
-    })
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages })
   })
 
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
