@@ -15,6 +15,9 @@ module.exports = async function handler(req, res) {
   }
 
   try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 25000) // 25秒超时
+
     const response = await fetch(
       'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
       {
@@ -23,18 +26,24 @@ module.exports = async function handler(req, res) {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`
         },
-        body: JSON.stringify({ model: 'qwen-plus', messages, stream: false })
+        body: JSON.stringify({ model: 'qwen-plus', messages, stream: false }),
+        signal: controller.signal
       }
     )
+    clearTimeout(timeout)
 
+    const text = await response.text()
     if (!response.ok) {
-      const text = await response.text()
+      console.error('DashScope error:', response.status, text)
       return res.status(response.status).json({ error: text })
     }
 
-    const data = await response.json()
-    return res.json(data)
+    return res.status(200).json(JSON.parse(text))
   } catch (err) {
+    console.error('api/chat error:', err.message)
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request to DashScope timed out' })
+    }
     return res.status(500).json({ error: err.message })
   }
 }
