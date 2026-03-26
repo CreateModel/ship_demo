@@ -186,7 +186,7 @@
         <textarea
           v-model="chatInput"
           class="chat-input"
-          :placeholder="isListening ? '正在聆听，请说话...' : '输入问题，按 Enter 发送...'"
+          :placeholder="isListening ? '🎙 正在录音，再点一次停止...' : '输入问题，按 Enter 发送...'"
           rows="2"
           @keydown.enter.exact.prevent="sendChat"
           :disabled="chatLoading"
@@ -196,8 +196,8 @@
             class="chat-voice-btn"
             :class="{ listening: isListening, unsupported: !speechSupported }"
             @click="toggleVoice"
-            :title="!speechSupported ? '浏览器不支持语音输入' : isListening ? '点击停止' : '点击开始语音输入'"
-            :disabled="!speechSupported || chatLoading"
+            :title="!speechSupported ? '浏览器不支持录音' : isListening ? '点击停止录音并识别' : '点击开始语音输入'"
+            :disabled="!speechSupported || chatLoading || chatInput === '🔄 识别中...'"
           >
             <span class="mic-icon">{{ isListening ? '⏹' : '🎙' }}</span>
             <span class="mic-wave" v-if="isListening"></span>
@@ -236,56 +236,93 @@ const chatInput = ref('')
 const chatLoading = ref(false)
 const chatMessagesEl = ref(null)
 
-// Voice input
+// Voice input — Paraformer（阿里云 DashScope）
 const isListening = ref(false)
-const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition)
-let recognition = null
+const speechSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+let mediaRecorder = null
+let audioChunks = []
 
-function initRecognition() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-  if (!SpeechRecognition) return null
-  const r = new SpeechRecognition()
-  r.lang = 'zh-CN'
-  r.continuous = false
-  r.interimResults = true
-  r.maxAlternatives = 1
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    audioChunks = []
 
-  r.onresult = (event) => {
-    let interim = ''
-    let final = ''
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const text = event.results[i][0].transcript
-      if (event.results[i].isFinal) final += text
-      else interim += text
+    // 优先用 webm/opus，回退到默认
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : ''
+
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) audioChunks.push(e.data)
     }
-    chatInput.value = final || interim
-  }
 
-  r.onend = () => {
-    isListening.value = false
-  }
+    mediaRecorder.onstop = async () => {
+      // 停止所有音轨
+      stream.getTracks().forEach(t => t.stop())
+      isListening.value = false
 
-  r.onerror = (e) => {
+      if (audioChunks.length === 0) return
+
+      // 转 base64
+      const blob = new Blob(audioChunks, { type: mimeType || 'audio/webm' })
+      const arrayBuffer = await blob.arrayBuffer()
+      const uint8 = new Uint8Array(arrayBuffer)
+      let binary = ''
+      for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i])
+      const base64 = btoa(binary)
+
+      // 调用后端 Paraformer
+      chatInput.value = '🔄 识别中...'
+      try {
+        const res = await fetch('/api/speech', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audio: base64, format: 'webm' })
+        })
+        const data = await res.json()
+        if (data.text && data.text.trim()) {
+          chatInput.value = data.text.trim()
+          // 自动发送
+          await nextTick()
+          sendChat()
+        } else {
+          chatInput.value = ''
+          chatMessages.value.push({ role: 'assistant', content: '⚠️ 未能识别语音，请再试一次。' })
+        }
+      } catch (e) {
+        chatInput.value = ''
+        chatMessages.value.push({ role: 'assistant', content: `⚠️ 语音识别失败：${e.message}` })
+      }
+    }
+
+    mediaRecorder.start()
+    isListening.value = true
+  } catch (e) {
     isListening.value = false
-    if (e.error === 'not-allowed') {
+    if (e.name === 'NotAllowedError') {
       chatMessages.value.push({ role: 'assistant', content: '⚠️ 麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。' })
+    } else {
+      chatMessages.value.push({ role: 'assistant', content: `⚠️ 无法启动麦克风：${e.message}` })
     }
   }
+}
 
-  return r
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop()
+  }
 }
 
 function toggleVoice() {
   if (!speechSupported) return
   if (isListening.value) {
-    recognition?.stop()
-    isListening.value = false
+    stopRecording()
   } else {
-    recognition = initRecognition()
-    if (!recognition) return
-    chatInput.value = ''
-    recognition.start()
-    isListening.value = true
+    startRecording()
   }
 }
 

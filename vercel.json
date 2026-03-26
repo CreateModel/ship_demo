@@ -6,6 +6,10 @@
   "functions": {
     "api/chat.js": {
       "regions": ["hkg1"]
+    },
+    "api/speech.js": {
+      "regions": ["hkg1"],
+      "maxDuration": 30
     }
   }
 }
