@@ -186,14 +186,26 @@
         <textarea
           v-model="chatInput"
           class="chat-input"
-          placeholder="输入问题，按 Enter 发送..."
+          :placeholder="isListening ? '正在聆听，请说话...' : '输入问题，按 Enter 发送...'"
           rows="2"
           @keydown.enter.exact.prevent="sendChat"
           :disabled="chatLoading"
         ></textarea>
-        <button class="chat-send-btn" @click="sendChat" :disabled="chatLoading || !chatInput.trim()">
-          发送
-        </button>
+        <div class="chat-btns">
+          <button
+            class="chat-voice-btn"
+            :class="{ listening: isListening, unsupported: !speechSupported }"
+            @click="toggleVoice"
+            :title="!speechSupported ? '浏览器不支持语音输入' : isListening ? '点击停止' : '点击开始语音输入'"
+            :disabled="!speechSupported || chatLoading"
+          >
+            <span class="mic-icon">{{ isListening ? '⏹' : '🎙' }}</span>
+            <span class="mic-wave" v-if="isListening"></span>
+          </button>
+          <button class="chat-send-btn" @click="sendChat" :disabled="chatLoading || !chatInput.trim()">
+            发送
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -223,6 +235,59 @@ const chatMessages = ref([])
 const chatInput = ref('')
 const chatLoading = ref(false)
 const chatMessagesEl = ref(null)
+
+// Voice input
+const isListening = ref(false)
+const speechSupported = !!(window.SpeechRecognition || window.webkitSpeechRecognition)
+let recognition = null
+
+function initRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+  if (!SpeechRecognition) return null
+  const r = new SpeechRecognition()
+  r.lang = 'zh-CN'
+  r.continuous = false
+  r.interimResults = true
+  r.maxAlternatives = 1
+
+  r.onresult = (event) => {
+    let interim = ''
+    let final = ''
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const text = event.results[i][0].transcript
+      if (event.results[i].isFinal) final += text
+      else interim += text
+    }
+    chatInput.value = final || interim
+  }
+
+  r.onend = () => {
+    isListening.value = false
+  }
+
+  r.onerror = (e) => {
+    isListening.value = false
+    if (e.error === 'not-allowed') {
+      chatMessages.value.push({ role: 'assistant', content: '⚠️ 麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。' })
+    }
+  }
+
+  return r
+}
+
+function toggleVoice() {
+  if (!speechSupported) return
+  if (isListening.value) {
+    recognition?.stop()
+    isListening.value = false
+  } else {
+    recognition = initRecognition()
+    if (!recognition) return
+    chatInput.value = ''
+    recognition.start()
+    isListening.value = true
+  }
+}
 
 function routeNumToId(num) {
   if (num === 1) return 'A'
@@ -811,6 +876,46 @@ function buildPolyline(points, yGetter) {
   border-top: 1px solid #0d2a4a;
   flex-shrink: 0;
 }
+.chat-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+.chat-voice-btn {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(74, 158, 255, 0.1);
+  border: 1px solid #4a9eff;
+  color: #4a9eff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.chat-voice-btn:hover:not(:disabled) { background: rgba(74, 158, 255, 0.25); }
+.chat-voice-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.chat-voice-btn.unsupported { border-color: #2a4a6a; color: #2a4a6a; }
+.chat-voice-btn.listening {
+  background: rgba(255, 80, 80, 0.15);
+  border-color: #ff5050;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+.mic-icon { font-size: 15px; line-height: 1; }
+.mic-wave {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 2px solid #ff5050;
+  animation: mic-ring 1.2s ease-out infinite;
+  top: 0; left: 0;
+}
 .chat-input {
   flex: 1;
   background: rgba(5, 15, 35, 0.8);
@@ -844,4 +949,6 @@ function buildPolyline(points, yGetter) {
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes mic-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,80,80,0.4); } 50% { box-shadow: 0 0 0 6px rgba(255,80,80,0); } }
+@keyframes mic-ring { 0% { transform: scale(1); opacity: 0.7; } 100% { transform: scale(1.7); opacity: 0; } }
 </style>

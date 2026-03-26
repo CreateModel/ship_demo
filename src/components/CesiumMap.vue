@@ -6,7 +6,8 @@
 
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue'
-import * as Cesium from 'cesium'
+import maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
 import { getRiskColor, routesMeta } from '../data/mockData.js'
 
 const props = defineProps({
@@ -18,200 +19,275 @@ const props = defineProps({
 const emit = defineEmits(['hoverPoint', 'clickPoint'])
 
 const mapEl = ref(null)
-let viewer = null
-let hoverHandler = null
+let map = null
 let drawRunId = 0
+const previewCache = new Map()
+
+// 所有已添加的 layer/source id，用于清除
+const addedLayers = []
+const addedSources = []
 
 onMounted(() => {
-  // 不使用 Ion token，直接用 OSM 底图
-  viewer = new Cesium.Viewer(mapEl.value, {
-    baseLayer: new Cesium.ImageryLayer(
-      new Cesium.UrlTemplateImageryProvider({
-        url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        credit: '© OpenStreetMap contributors'
-      })
-    ),
-    timeline: false,
-    animation: false,
-    baseLayerPicker: false,
-    geocoder: false,
-    homeButton: false,
-    sceneModePicker: false,
-    navigationHelpButton: false,
-    fullscreenButton: false,
-    infoBox: false,
-    selectionIndicator: false,
-    terrainProvider: new Cesium.EllipsoidTerrainProvider()
+  map = new maplibregl.Map({
+    container: mapEl.value,
+    style: {
+      version: 8,
+      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      sources: {
+        basemap: {
+          type: 'raster',
+          tiles: ['http://map.meteochina.com/tiles/googlesat/{z}/{x}/{y}.png'],
+          tileSize: 256,
+          attribution: '© meteochina'
+        }
+      },
+      layers: [
+        { id: 'basemap', type: 'raster', source: 'basemap' }
+      ]
+    },
+    center: [160, 35],
+    zoom: 3,
+    attributionControl: false
   })
 
-  viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a3a5f')
-
-  hoverHandler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
-
-  hoverHandler.setInputAction((movement) => {
-    const picked = viewer.scene.pick(movement.endPosition)
-    if (Cesium.defined(picked) && picked.id && picked.id._pointData) {
-      emit('hoverPoint', picked.id._pointData)
-    } else {
-      emit('hoverPoint', null)
-    }
-  }, Cesium.ScreenSpaceEventType.MOUSE_MOVE)
-
-  hoverHandler.setInputAction((click) => {
-    const picked = viewer.scene.pick(click.position)
-    if (Cesium.defined(picked) && picked.id && picked.id._pointData) {
-      emit('clickPoint', picked.id._pointData)
-      const pt = picked.id._pointData
-      viewer.camera.flyTo({
-        destination: Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, 800000),
-        duration: 1.2
+  map.on('load', () => {
+    // hover 事件
+    map.on('mousemove', (e) => {
+      const features = map.queryRenderedFeatures(e.point, {
+        layers: addedLayers.filter(l => l.startsWith('points-'))
       })
-    }
-  }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
-
-  // Watch inside onMounted so viewer is always ready
-  watch([
-    () => props.routeResults,
-    () => props.selectedRoutes,
-    () => props.selectedShip
-  ], async ([results]) => {
-    const runId = ++drawRunId
-    viewer.entities.removeAll()
-    const shipId = props.selectedShip?.id
-    const displayDataMap = {}
-
-    for (const route of (props.selectedRoutes || [])) {
-      if (runId !== drawRunId) return
-
-      const analyzedData = results?.[route.id]
-      if (analyzedData) {
-        drawRoute(route, analyzedData, true)
-        displayDataMap[route.id] = analyzedData
-        continue
+      if (features.length) {
+        map.getCanvas().style.cursor = 'pointer'
+        emit('hoverPoint', features[0].properties)
+      } else {
+        map.getCanvas().style.cursor = ''
+        emit('hoverPoint', null)
       }
+    })
 
-      const key = shipId ? `${shipId}_${route.id}` : `preview_${route.id}`
-      let previewData = previewCache.get(key)
-      if (!previewData) {
-        try {
-          const url = shipId
-            ? `/data/${shipId}_Route_${route.id}.json`
-            : `/data/Route_${route.id}.json`
-          const res = await fetch(url)
-          previewData = await res.json()
-          previewCache.set(key, previewData)
-        } catch (e) {
-          console.warn('Failed to load preview data', e)
+    // click 事件
+    map.on('click', (e) => {
+      const features = map.queryRenderedFeatures(e.point, {
+        layers: addedLayers.filter(l => l.startsWith('points-'))
+      })
+      if (features.length) {
+        const pt = features[0].properties
+        emit('clickPoint', pt)
+        map.flyTo({ center: [pt.lon, pt.lat], zoom: Math.max(map.getZoom(), 4), duration: 1200 })
+      }
+    })
+
+    // watch 在 load 之后注册
+    watch(
+      [() => props.routeResults, () => props.selectedRoutes, () => props.selectedShip],
+      async ([results]) => {
+        const runId = ++drawRunId
+        clearAllLayers()
+        const shipId = props.selectedShip?.id
+        const allCoords = []
+
+        for (const route of (props.selectedRoutes || [])) {
+          if (runId !== drawRunId) return
+          const analyzedData = results?.[route.id]
+          if (analyzedData) {
+            drawRoute(route, analyzedData, true)
+            for (const c of (analyzedData.coordinates || [])) {
+              if (c.lon && c.lat) allCoords.push([c.lon, c.lat])
+            }
+            continue
+          }
+
+          const key = shipId ? `${shipId}_${route.id}` : `preview_${route.id}`
+          let previewData = previewCache.get(key)
+          if (!previewData) {
+            try {
+              const url = shipId
+                ? `/data/${shipId}_Route_${route.id}.json`
+                : `/data/Route_${route.id}.json`
+              const res = await fetch(url)
+              previewData = await res.json()
+              previewCache.set(key, previewData)
+            } catch (e) {
+              console.warn('Failed to load preview data', e)
+            }
+          }
+          if (runId !== drawRunId) return
+          if (previewData) {
+            drawRoute(route, previewData, false)
+            const coords = previewData.coordinates || previewData.content || []
+            for (const c of coords) {
+              if (c.lon && c.lat) allCoords.push([c.lon, c.lat])
+            }
+          }
         }
-      }
 
-      if (runId !== drawRunId) return
-
-      if (previewData) {
-        drawRoute(route, previewData, false)
-        displayDataMap[route.id] = previewData
-      }
-    }
-
-    fitToRoutes(displayDataMap)
-  }, { deep: true, immediate: true })
+        if (allCoords.length > 0) fitToCoords(allCoords)
+      },
+      { deep: true, immediate: true }
+    )
+  })
 })
 
 onUnmounted(() => {
-  hoverHandler?.destroy()
-  viewer?.destroy()
+  map?.remove()
 })
 
-const previewCache = new Map()
+function clearAllLayers() {
+  for (const id of [...addedLayers]) {
+    if (map.getLayer(id)) map.removeLayer(id)
+  }
+  for (const id of [...addedSources]) {
+    if (map.getSource(id)) map.removeSource(id)
+  }
+  addedLayers.length = 0
+  addedSources.length = 0
+}
 
-function drawRoute(route, data, analyzed = false) {
+let _uid = 0
+function uid(prefix) { return `${prefix}-${++_uid}` }
+
+function addSource(id, data) {
+  map.addSource(id, { type: 'geojson', data })
+  addedSources.push(id)
+}
+
+function addLayer(layer) {
+  map.addLayer(layer)
+  addedLayers.push(layer.id)
+}
+
+function drawRoute(route, data, analyzed) {
   const coords = data.coordinates || data.content || []
   if (coords.length < 2) return
-
   const meta = routesMeta.find(r => r.id === route.id)
-  const baseColor = Cesium.Color.fromCssColorString(meta?.color || '#ffffff')
+  const previewColor = meta?.color || '#ffffff'
 
+  // 1. 航线线段（分段着色）
+  const lineFeatures = []
   for (let i = 0; i < coords.length - 1; i++) {
     const a = coords[i], b = coords[i + 1]
     if (!a.lon || !a.lat || !b.lon || !b.lat) continue
-    const segColor = analyzed
-      ? Cesium.Color.fromCssColorString(getRiskColor(a.weatherWarn))
-      : Cesium.Color.fromCssColorString('#ffffff')
+    const color = analyzed ? getRiskColor(a.weatherWarn) : previewColor
+    lineFeatures.push({
+      type: 'Feature',
+      properties: { color, analyzed: analyzed ? 1 : 0 },
+      geometry: { type: 'LineString', coordinates: [[a.lon, a.lat], [b.lon, b.lat]] }
+    })
+  }
 
-    viewer.entities.add({
-      polyline: {
-        positions: Cesium.Cartesian3.fromDegreesArray([a.lon, a.lat, b.lon, b.lat]),
-        width: analyzed ? 4 : 3,
-        material: new Cesium.PolylineGlowMaterialProperty({
-          glowPower: analyzed ? 0.12 : 0.08,
-          color: segColor
-        }),
-        clampToGround: true
+  const lineSourceId = uid('line-src')
+  const lineLayerId = uid('line-lyr')
+  addSource(lineSourceId, { type: 'FeatureCollection', features: lineFeatures })
+  addLayer({
+    id: lineLayerId,
+    type: 'line',
+    source: lineSourceId,
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': ['get', 'color'],
+      'line-width': analyzed ? 14 : 10,
+      'line-opacity': analyzed ? 0.95 : 0.75
+    }
+  })
+
+  // 2. 发光描边（叠在下面，略宽更淡）
+  const glowLayerId = uid('glow-lyr')
+  addLayer({
+    id: glowLayerId,
+    type: 'line',
+    source: lineSourceId,
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: {
+      'line-color': ['get', 'color'],
+      'line-width': analyzed ? 26 : 20,
+      'line-opacity': analyzed ? 0.18 : 0.12,
+      'line-blur': 6
+    }
+  })
+  // 把发光层移到线段层下面
+  map.moveLayer(glowLayerId, lineLayerId)
+
+  // 3. 风险点（analyzed 时，每5点取一个）
+  if (analyzed) {
+    const pointFeatures = []
+    for (let i = 0; i < coords.length; i += 5) {
+      const pt = coords[i]
+      if (!pt.lon || !pt.lat) continue
+      pointFeatures.push({
+        type: 'Feature',
+        properties: {
+          ...pt,
+          riskColor: getRiskColor(pt.weatherWarn),
+          size: pt.weatherWarn >= 4 ? 10 : 6
+        },
+        geometry: { type: 'Point', coordinates: [pt.lon, pt.lat] }
+      })
+    }
+    const ptSourceId = uid('pt-src')
+    const ptLayerId = uid(`points-${route.id}`)
+    addSource(ptSourceId, { type: 'FeatureCollection', features: pointFeatures })
+    addLayer({
+      id: ptLayerId,
+      type: 'circle',
+      source: ptSourceId,
+      paint: {
+        'circle-radius': ['get', 'size'],
+        'circle-color': ['get', 'riskColor'],
+        'circle-stroke-color': 'rgba(255,255,255,0.6)',
+        'circle-stroke-width': 1.5
       }
     })
   }
 
-  if (analyzed) {
-    for (let i = 0; i < coords.length; i += 5) {
-      const pt = coords[i]
-      if (!pt.lon || !pt.lat) continue
-      const riskColor = Cesium.Color.fromCssColorString(getRiskColor(pt.weatherWarn))
-      const entity = viewer.entities.add({
-        position: Cesium.Cartesian3.fromDegrees(pt.lon, pt.lat, 0),
-        point: {
-          pixelSize: pt.weatherWarn >= 4 ? 9 : 5,
-          color: riskColor,
-          outlineColor: Cesium.Color.WHITE.withAlpha(0.5),
-          outlineWidth: 1,
-          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
-        }
-      })
-      entity._pointData = { ...pt, routeId: route.id }
-    }
-  }
-
-  // 起点标签
+  // 4. 起点标签
   const first = coords[0]
   if (first?.lon && first?.lat) {
-    viewer.entities.add({
-      position: Cesium.Cartesian3.fromDegrees(first.lon, first.lat, 10000),
-      label: {
-        text: meta?.name || route.id,
-        font: 'bold 14px sans-serif',
-        fillColor: baseColor,
-        outlineColor: Cesium.Color.BLACK,
-        outlineWidth: 2,
-        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-        pixelOffset: new Cesium.Cartesian2(0, -20),
-        heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
+    const labelSourceId = uid('label-src')
+    const labelLayerId = uid('label-lyr')
+    addSource(labelSourceId, {
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        properties: { name: meta?.name || route.id, color: previewColor },
+        geometry: { type: 'Point', coordinates: [first.lon, first.lat] }
+      }]
+    })
+    addLayer({
+      id: labelLayerId,
+      type: 'symbol',
+      source: labelSourceId,
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-size': 13,
+        'text-offset': [0, -1.5],
+        'text-anchor': 'bottom'
+      },
+      paint: {
+        'text-color': ['get', 'color'],
+        'text-halo-color': '#000',
+        'text-halo-width': 2
       }
     })
   }
 }
 
-function fitToRoutes(dataMap = {}) {
-  if (!props.selectedRoutes?.length) return
-  const allCoords = []
-
-  for (const route of props.selectedRoutes) {
-    const data = dataMap[route.id]
-    if (data?.coordinates) {
-      for (const c of data.coordinates) {
-        if (c.lon && c.lat) allCoords.push(Cesium.Cartesian3.fromDegrees(c.lon, c.lat))
-      }
-    }
+function fitToCoords(allCoords) {
+  if (!allCoords.length) return
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity
+  for (const [lon, lat] of allCoords) {
+    minLon = Math.min(minLon, lon)
+    maxLon = Math.max(maxLon, lon)
+    minLat = Math.min(minLat, lat)
+    maxLat = Math.max(maxLat, lat)
   }
-
-  if (allCoords.length === 0) return
-  const sphere = Cesium.BoundingSphere.fromPoints(allCoords)
-  viewer.camera.flyToBoundingSphere(sphere, {
-    duration: 2,
-    offset: new Cesium.HeadingPitchRange(0, -0.5, sphere.radius * 2.5)
-  })
+  map.fitBounds([[minLon, minLat], [maxLon, maxLat]], { padding: 60, duration: 1800 })
 }
 </script>
 
 <style scoped>
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
 .map-container {
   width: 100%;
   height: 100%;
