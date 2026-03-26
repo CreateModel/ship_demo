@@ -6,7 +6,7 @@
 
 <script setup>
 import { ref, watch, onMounted, onUnmounted } from 'vue'
-import maplibregl from 'maplibre-gl'
+import { XMap } from '../xmap/xmap.js'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { getRiskColor, routesMeta } from '../data/mockData.js'
 
@@ -28,15 +28,16 @@ const addedLayers = []
 const addedSources = []
 
 onMounted(() => {
-  map = new maplibregl.Map({
+  map = new XMap({
     container: mapEl.value,
+    workers: 2,
     style: {
       version: 8,
-      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      glyphs: 'https://www.meteochina.com/tiles/ummap/font/{fontstack}/{range}.pbf',
       sources: {
         basemap: {
           type: 'raster',
-          tiles: ['http://map.meteochina.com/tiles/googlesat/{z}/{x}/{y}.png'],
+          tiles: ['https://map.meteochina.com/tiles/googlesat/{z}/{x}/{y}.png'],
           tileSize: 256,
           attribution: '© meteochina'
         }
