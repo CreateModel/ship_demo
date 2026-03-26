@@ -236,94 +236,76 @@ const chatInput = ref('')
 const chatLoading = ref(false)
 const chatMessagesEl = ref(null)
 
-// Voice input — Paraformer（阿里云 DashScope）
+// Voice input — 浏览器原生 Web Speech API
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+const speechSupported = !!SpeechRecognition
 const isListening = ref(false)
-const speechSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
-let mediaRecorder = null
-let audioChunks = []
+let recognition = null
 
-async function startRecording() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    audioChunks = []
+// 航运领域语音识别错别字矫正
+const ASR_CORRECTIONS = [
+  // 船的误识别（传、chuan 等）
+  [/传/g, '船'],
+  [/chuan/gi, '船'],
+  // 数字谐音（零一/林依晨 → 01 等）
+  [/林依晨|林依传|林依/g, '01'],
+  [/零遗|零一/g, '01'],
+  [/零二/g, '02'],
+  [/零三/g, '03'],
+  // 其他航运词汇矫正
+  [/杭路|行路/g, '航路'],
+  [/行线|杭线/g, '航线'],
+  [/丰险|封险/g, '风险'],
+  [/评固|评鼓/g, '评估'],
+  [/报鼓|爆告/g, '报告'],
+  [/旋转/g, '选择'],
+  [/钩选/g, '勾选'],
+]
 
-    // 优先用 webm/opus，回退到默认
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm')
-        ? 'audio/webm'
-        : ''
-
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) audioChunks.push(e.data)
-    }
-
-    mediaRecorder.onstop = async () => {
-      // 停止所有音轨
-      stream.getTracks().forEach(t => t.stop())
-      isListening.value = false
-
-      if (audioChunks.length === 0) return
-
-      // 转 base64
-      const blob = new Blob(audioChunks, { type: mimeType || 'audio/webm' })
-      const arrayBuffer = await blob.arrayBuffer()
-      const uint8 = new Uint8Array(arrayBuffer)
-      let binary = ''
-      for (let i = 0; i < uint8.length; i++) binary += String.fromCharCode(uint8[i])
-      const base64 = btoa(binary)
-
-      // 调用后端 Paraformer
-      chatInput.value = '🔄 识别中...'
-      try {
-        const res = await fetch('/api/speech', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audio: base64, format: 'webm' })
-        })
-        const data = await res.json()
-        if (data.text && data.text.trim()) {
-          chatInput.value = data.text.trim()
-          // 自动发送
-          await nextTick()
-          sendChat()
-        } else {
-          chatInput.value = ''
-          chatMessages.value.push({ role: 'assistant', content: '⚠️ 未能识别语音，请再试一次。' })
-        }
-      } catch (e) {
-        chatInput.value = ''
-        chatMessages.value.push({ role: 'assistant', content: `⚠️ 语音识别失败：${e.message}` })
-      }
-    }
-
-    mediaRecorder.start()
-    isListening.value = true
-  } catch (e) {
-    isListening.value = false
-    if (e.name === 'NotAllowedError') {
-      chatMessages.value.push({ role: 'assistant', content: '⚠️ 麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。' })
-    } else {
-      chatMessages.value.push({ role: 'assistant', content: `⚠️ 无法启动麦克风：${e.message}` })
-    }
+function correctASR(text) {
+  let result = text
+  for (const [pattern, replacement] of ASR_CORRECTIONS) {
+    result = result.replace(pattern, replacement)
   }
-}
-
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop()
-  }
+  return result
 }
 
 function toggleVoice() {
-  if (!speechSupported) return
-  if (isListening.value) {
-    stopRecording()
-  } else {
-    startRecording()
+  if (!speechSupported) {
+    chatMessages.value.push({ role: 'assistant', content: '⚠️ 当前浏览器不支持语音输入，请使用 Chrome。' })
+    return
   }
+  if (isListening.value) {
+    recognition && recognition.stop()
+    return
+  }
+
+  recognition = new SpeechRecognition()
+  recognition.lang = 'zh-CN'
+  recognition.interimResults = false
+  recognition.maxAlternatives = 1
+
+  recognition.onstart = () => { isListening.value = true }
+  recognition.onend = () => { isListening.value = false }
+  recognition.onerror = (e) => {
+    isListening.value = false
+    if (e.error === 'not-allowed') {
+      chatMessages.value.push({ role: 'assistant', content: '⚠️ 麦克风权限被拒绝，请在浏览器设置中允许麦克风访问。' })
+    } else {
+      chatMessages.value.push({ role: 'assistant', content: `⚠️ 语音识别失败：${e.error}` })
+    }
+  }
+  recognition.onresult = async (e) => {
+    const raw = e.results[0][0].transcript.trim()
+    const text = correctASR(raw)
+    if (text) {
+      chatInput.value = text
+      await nextTick()
+      sendChat()
+    }
+  }
+
+  recognition.start()
 }
 
 function routeNumToId(num) {
@@ -343,15 +325,28 @@ function normalizeText(text) {
 function detectShipId(text) {
   const t = normalizeText(text)
 
+  // a01/a02/a03 直接匹配
   const mA = t.match(/a0?([123])/i)
   if (mA) return `A0${mA[1]}`
 
-  const mNumShip = t.match(/(?:船型|船|ship)([123])/i) || t.match(/([123])(?:号?船型|号?船)/i)
+  // 数字+船/船型
+  const mNumShip = t.match(/(?:船型|船|chuan|ship)([123])/i) || t.match(/([123])(?:号?船型|号?船|号?chuan)/i)
   if (mNumShip) return `A0${mNumShip[1]}`
 
-  if (/一号?船|第一个船型|第1个船型/.test(t)) return 'A01'
-  if (/二号?船|第二个船型|第2个船型/.test(t)) return 'A02'
-  if (/三号?船|第三个船型|第3个船型/.test(t)) return 'A03'
+  // 第X个/第X条船
+  if (/第?一个?船|第?1个?船|第一个chuan|第1个chuan/.test(t)) return 'A01'
+  if (/第?二个?船|第?2个?船|第二个chuan|第2个chuan/.test(t)) return 'A02'
+  if (/第?三个?船|第?3个?船|第三个chuan|第3个chuan/.test(t)) return 'A03'
+
+  // 一/二/三号船
+  if (/一号?[船c]|第一个船型|第1个船型/.test(t)) return 'A01'
+  if (/二号?[船c]|第二个船型|第2个船型/.test(t)) return 'A02'
+  if (/三号?[船c]|第三个船型|第3个船型/.test(t)) return 'A03'
+
+  // 独立 01/02/03（ASR矫正零一→01后，文本中只有数字）
+  if (/(?:选择|勾选|选)01/.test(t) || /^01$/.test(t.replace(/[^0-9]/g, ''))) return 'A01'
+  if (/(?:选择|勾选|选)02/.test(t) || t === '02') return 'A02'
+  if (/(?:选择|勾选|选)03/.test(t) || t === '03') return 'A03'
 
   return null
 }
@@ -359,8 +354,14 @@ function detectShipId(text) {
 function detectRouteId(text) {
   const t = normalizeText(text)
 
-  const mRouteNum = t.match(/(?:航线|航路|route)([123])/i)
-  if (mRouteNum) return routeNumToId(Number(mRouteNum[1]))
+  const mRouteNum = t.match(/(?:航线|航路|route)([123一二三])/i)
+  if (mRouteNum) {
+    const n = mRouteNum[1]
+    if (n === '1' || n === '一') return 'A'
+    if (n === '2' || n === '二') return 'B'
+    if (n === '3' || n === '三') return 'C'
+    return routeNumToId(Number(n))
+  }
 
   const mRouteLetter = t.match(/route([abc])/i)
   if (mRouteLetter) return mRouteLetter[1].toUpperCase()
@@ -371,6 +372,9 @@ function detectRouteId(text) {
   if (/第一个航线|第一个航路/.test(t)) return 'A'
   if (/第二个航线|第二个航路/.test(t)) return 'B'
   if (/第三个航线|第三个航路/.test(t)) return 'C'
+  if (/选择?1号?航|选择?一号?航/.test(t)) return 'A'
+  if (/选择?2号?航|选择?二号?航/.test(t)) return 'B'
+  if (/选择?3号?航|选择?三号?航/.test(t)) return 'C'
 
   return null
 }
@@ -391,10 +395,10 @@ function parseIntent(text) {
   if (shipId && routeId) {
     return { type: 'selectBoth', shipId, routeId }
   }
-  if (shipId && (mentionsSelection || /船型|船/i.test(raw))) {
+  if (shipId && (mentionsSelection || /船型|船|chuan/i.test(raw) || shipId)) {
     return { type: 'selectShip', shipId }
   }
-  if (routeId && (mentionsSelection || /航线|航路|route/i.test(raw))) {
+  if (routeId && (mentionsSelection || /航线|航路|route/i.test(raw) || routeId)) {
     return { type: 'selectRoute', routeId }
   }
 

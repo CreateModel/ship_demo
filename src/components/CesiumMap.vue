@@ -33,13 +33,12 @@ onMounted(() => {
     workers: 2,
     style: {
       version: 8,
-      glyphs: 'https://www.meteochina.com/tiles/ummap/font/{fontstack}/{range}.pbf',
       sources: {
         basemap: {
           type: 'raster',
-          tiles: ['https://map.meteochina.com/tiles/googlesat/{z}/{x}/{y}.png'],
+          tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
           tileSize: 256,
-          attribution: '© meteochina'
+          attribution: '© Esri'
         }
       },
       layers: [
