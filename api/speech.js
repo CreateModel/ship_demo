@@ -1,12 +1,6 @@
-// Paraformer 语音识别 API（阿里云 DashScope）
-// 接收前端 base64 音频，提交异步任务并轮询结果，返回识别文本
-
-const POLL_MAX = 15      // 最多轮询 15 次
-const POLL_INTERVAL = 1000  // 每次间隔 1 秒
-
-async function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms))
-}
+// Paraformer 语音识别（DashScope OpenAI 兼容接口）
+// 用法：前端 POST { audio: base64字符串, format: 'webm'/'wav' }
+// 返回：{ text: '识别文字' }
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -23,104 +17,67 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: 'API key not configured' })
   }
 
-  const audioFormat = format || 'wav'
-
   try {
-    // Step 1: 提交异步转写任务（base64 方式）
-    const submitRes = await fetch(
-      'https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription',
+    const audioFormat = format || 'webm'
+    const audioBuffer = Buffer.from(audio, 'base64')
+
+    // 构建 multipart/form-data（手动拼接，兼容 Vercel Node.js 运行时）
+    const boundary = 'Boundary' + Date.now().toString(16)
+    const CRLF = '\r\n'
+    const mimeType = audioFormat === 'wav' ? 'audio/wav'
+                   : audioFormat === 'mp3' ? 'audio/mpeg'
+                   : 'audio/webm'
+
+    const partHeader = Buffer.from(
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="file"; filename="audio.${audioFormat}"${CRLF}` +
+      `Content-Type: ${mimeType}${CRLF}${CRLF}`
+    )
+    const modelPart = Buffer.from(
+      `${CRLF}--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="model"${CRLF}${CRLF}` +
+      `paraformer-v2` +
+      `${CRLF}--${boundary}--${CRLF}`
+    )
+
+    const body = Buffer.concat([partHeader, audioBuffer, modelPart])
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 25000)
+
+    const response = await fetch(
+      'https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions',
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'X-DashScope-Async': 'enable'
+          'Content-Type': `multipart/form-data; boundary=${boundary}`
         },
-        body: JSON.stringify({
-          model: 'paraformer-v2',
-          input: {
-            audio_format: audioFormat,
-            audio_data: audio   // base64 字符串
-          },
-          parameters: {
-            language_hints: ['zh', 'en']
-          }
-        }),
-        signal: AbortSignal.timeout(15000)
+        body,
+        signal: controller.signal
       }
     )
+    clearTimeout(timer)
 
-    const submitText = await submitRes.text()
-    if (!submitRes.ok) {
-      console.error('[api/speech] submit error:', submitRes.status, submitText)
-      return res.status(500).json({ error: `ASR submit error ${submitRes.status}: ${submitText}` })
-    }
+    const responseText = await response.text()
+    console.log('[api/speech] status:', response.status, 'body:', responseText.slice(0, 300))
 
-    const submitData = JSON.parse(submitText)
-    const taskId = submitData?.output?.task_id
-    if (!taskId) {
-      return res.status(500).json({ error: 'No task_id returned', detail: submitText })
-    }
-
-    // Step 2: 轮询任务状态
-    const pollUrl = `https://dashscope.aliyuncs.com/api/v1/tasks/${taskId}`
-    for (let i = 0; i < POLL_MAX; i++) {
-      await sleep(POLL_INTERVAL)
-
-      const pollRes = await fetch(pollUrl, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(10000)
+    if (!response.ok) {
+      return res.status(500).json({
+        error: `ASR error ${response.status}`,
+        detail: responseText.slice(0, 500)
       })
-      const pollText = await pollRes.text()
-      if (!pollRes.ok) {
-        console.error('[api/speech] poll error:', pollRes.status, pollText)
-        continue
-      }
-
-      const pollData = JSON.parse(pollText)
-      const status = pollData?.output?.task_status
-
-      if (status === 'SUCCEEDED') {
-        // 解析识别结果
-        const results = pollData?.output?.results || []
-        // 每个文件有一个 transcription_url，或者直接有文本
-        // 对于 base64 提交，通常直接返回文本
-        let text = ''
-        for (const r of results) {
-          if (r.transcription_url) {
-            // 拉取转写文本文件
-            try {
-              const txtRes = await fetch(r.transcription_url, { signal: AbortSignal.timeout(8000) })
-              const txtData = await txtRes.json()
-              // 格式: { transcripts: [ { text: '...' } ] }
-              for (const t of (txtData?.transcripts || [])) {
-                text += (t.text || t.transcript || '') + ' '
-              }
-            } catch (e) {
-              console.warn('[api/speech] fetch transcription_url failed:', e.message)
-            }
-          } else if (r.text) {
-            text += r.text + ' '
-          }
-        }
-        return res.json({ text: text.trim() })
-      }
-
-      if (status === 'FAILED') {
-        const reason = pollData?.output?.task_metrics || pollData?.output?.message || 'Unknown'
-        console.error('[api/speech] task failed:', reason)
-        return res.status(500).json({ error: `ASR task failed: ${reason}` })
-      }
-
-      // status: PENDING / RUNNING — 继续轮询
     }
 
-    return res.status(504).json({ error: '语音识别超时，请缩短录音后重试' })
+    // 成功响应格式: { text: '识别文字' }
+    const data = JSON.parse(responseText)
+    const text = data?.text || ''
+    return res.json({ text: text.trim() })
 
   } catch (err) {
     console.error('[api/speech]', err.message)
     if (err.name === 'AbortError' || err.name === 'TimeoutError') {
-      return res.status(504).json({ error: '请求超时，请重试' })
+      return res.status(504).json({ error: '语音识别超时，请重试' })
     }
     return res.status(500).json({ error: err.message })
   }
