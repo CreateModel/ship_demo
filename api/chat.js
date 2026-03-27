@@ -1,5 +1,17 @@
 const DASHSCOPE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 
+// 本地开发时通过代理访问外网
+let _agentCache = null
+async function getAgent() {
+  const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY
+  if (!proxy) return undefined
+  if (!_agentCache) {
+    const { HttpsProxyAgent } = await import('https-proxy-agent')
+    _agentCache = new HttpsProxyAgent(proxy)
+  }
+  return _agentCache
+}
+
 // 天气工具定义
 const tools = [
   {
@@ -21,33 +33,44 @@ const tools = [
   }
 ]
 
-// 调用 wttr.in 获取实时天气
+// 用 Open-Meteo（免费无需 key，直连）获取实时天气
 async function fetchWeather(location) {
-  const url = `https://wttr.in/${encodeURIComponent(location)}?format=j1`
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'curl/7.68.0' },
-    signal: AbortSignal.timeout(8000)
-  })
-  if (!res.ok) throw new Error(`天气接口返回 ${res.status}`)
-  const data = await res.json()
+  // 第一步：地理编码
+  const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(location)}&count=1&language=zh`
+  const geoRes = await fetch(geoUrl, { signal: AbortSignal.timeout(8000) })
+  if (!geoRes.ok) throw new Error(`地理编码失败 ${geoRes.status}`)
+  const geoData = await geoRes.json()
+  const place = geoData.results?.[0]
+  if (!place) throw new Error(`找不到地点：${location}`)
 
-  const c = data.current_condition?.[0]
-  if (!c) throw new Error('天气数据为空')
+  // 第二步：获取当前天气
+  const { latitude, longitude, name, country } = place
+  const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}` +
+    `&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,wind_direction_10m,visibility,surface_pressure,cloud_cover,weather_code` +
+    `&wind_speed_unit=ms&timezone=auto`
+  const wRes = await fetch(weatherUrl, { signal: AbortSignal.timeout(8000) })
+  if (!wRes.ok) throw new Error(`天气接口失败 ${wRes.status}`)
+  const wData = await wRes.json()
+  const c = wData.current
 
-  const area = data.nearest_area?.[0]
-  const areaName = area?.areaName?.[0]?.value || location
-  const country = area?.country?.[0]?.value || ''
+  const WMO = {
+    0:'晴',1:'基本晴',2:'局部多云',3:'阴',45:'雾',48:'冻雾',
+    51:'小毛毛雨',53:'毛毛雨',55:'大毛毛雨',61:'小雨',63:'中雨',65:'大雨',
+    71:'小雪',73:'中雪',75:'大雪',80:'阵雨',81:'中阵雨',82:'强阵雨',
+    95:'雷暴',96:'雷暴伴小冰雹',99:'雷暴伴大冰雹'
+  }
+  const desc = WMO[c.weather_code] || `天气代码${c.weather_code}`
 
   return JSON.stringify({
-    地点: `${areaName}${country ? '，' + country : ''}`,
-    温度: `${c.temp_C}°C（体感 ${c.FeelsLikeC}°C）`,
-    天气: c.weatherDesc?.[0]?.value || '未知',
-    湿度: `${c.humidity}%`,
-    风速: `${c.windspeedKmph} km/h`,
-    风向: c.winddir16Point,
-    能见度: `${c.visibility} km`,
-    气压: `${c.pressure} hPa`,
-    云量: `${c.cloudcover}%`
+    地点: `${name}，${country}`,
+    温度: `${c.temperature_2m}°C（体感 ${c.apparent_temperature}°C）`,
+    天气: desc,
+    湿度: `${c.relative_humidity_2m}%`,
+    风速: `${c.wind_speed_10m} m/s`,
+    风向: `${c.wind_direction_10m}°`,
+    能见度: `${(c.visibility / 1000).toFixed(1)} km`,
+    气压: `${c.surface_pressure} hPa`,
+    云量: `${c.cloud_cover}%`
   }, null, 2)
 }
 
@@ -59,6 +82,7 @@ async function callDashScope(apiKey, messages, withTools) {
   const body = { model: 'qwen-plus', messages, stream: false }
   if (withTools) body.tools = tools
 
+  const agent = await getAgent()
   const res = await fetch(DASHSCOPE_URL, {
     method: 'POST',
     headers: {
@@ -66,7 +90,8 @@ async function callDashScope(apiKey, messages, withTools) {
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify(body),
-    signal: controller.signal
+    signal: controller.signal,
+    ...(agent ? { agent } : {})
   })
   clearTimeout(timer)
 

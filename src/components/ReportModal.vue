@@ -514,7 +514,23 @@ function formatTimeLabel(t) {
 async function downloadPDF() {
   const { default: html2pdf } = await import('html2pdf.js')
   const el = document.getElementById('report-print-area')
-  html2pdf().set({ margin: 10, filename: '航路气象风险评估报告.pdf', html2canvas: { scale: 2 }, jsPDF: { format: 'a4' } }).from(el).save()
+
+  // Clone the element outside the clipped modal so html2pdf captures full content
+  const clone = el.cloneNode(true)
+  clone.style.cssText = 'position:fixed;left:-9999px;top:0;width:860px;background:#fff;overflow:visible;max-height:none;'
+  document.body.appendChild(clone)
+
+  try {
+    await html2pdf().set({
+      margin: 10,
+      filename: '航路气象风险评估报告.pdf',
+      html2canvas: { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
+    }).from(clone).save()
+  } finally {
+    document.body.removeChild(clone)
+  }
 }
 </script>
 
@@ -551,7 +567,7 @@ async function downloadPDF() {
 .report-body { flex: 1; overflow-y: auto; padding: 24px 28px; }
 .report-title-block { text-align: center; margin-bottom: 20px; }
 .report-main-title { font-size: 20px; font-weight: 800; color: #1a3a6f; letter-spacing: 2px; }
-.report-meta { font-size: 12px; color: #888; margin-top: 4px; }
+.report-meta { font-size: 12px; color: #555; margin-top: 4px; }
 .section { margin-bottom: 24px; }
 .section-title {
   font-size: 15px; font-weight: 700; color: #1a3a6f;
@@ -559,8 +575,8 @@ async function downloadPDF() {
   margin-bottom: 12px;
 }
 .info-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-.info-table td { padding: 6px 10px; border: 1px solid #dde6f5; }
-.info-label { background: #f0f5ff; color: #555; width: 100px; font-weight: 600; }
+.info-table td { padding: 6px 10px; border: 1px solid #dde6f5; color: #222; }
+.info-label { background: #f0f5ff; color: #333; width: 100px; font-weight: 600; }
 .info-value { color: #222; }
 .strong { font-weight: 700; color: #1a3a6f; }
 .risk-badge {
@@ -576,11 +592,11 @@ async function downloadPDF() {
   padding: 12px; background: #f8fbff;
   margin-bottom: 10px;
 }
-.chart-title { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 6px; }
+.chart-title { font-size: 12px; font-weight: 600; color: #222; margin-bottom: 6px; }
 .chart-svg { width: 100%; height: 120px; display: block; }
 .chart-legend {
   display: flex; gap: 16px; margin-top: 6px;
-  font-size: 11px; color: #666;
+  font-size: 11px; color: #444;
 }
 .leg-dot {
   display: inline-block; width: 10px; height: 10px;
@@ -588,7 +604,7 @@ async function downloadPDF() {
   vertical-align: middle;
 }
 .analysis-text {
-  font-size: 13px; color: #333; line-height: 1.8;
+  font-size: 13px; color: #111; line-height: 1.8;
   background: #f9fbff; border: 1px solid #dbe7f5;
   border-radius: 4px; padding: 10px 12px;
 }
@@ -608,9 +624,16 @@ async function downloadPDF() {
 .risk-tag.mid { background: #fff8e0; color: #b07000; }
 .risk-tag.low { background: #e8f8e8; color: #2a8a2a; }
 .advice-block { margin-bottom: 10px; border-left: 3px solid #0066cc; padding-left: 12px; }
+.sub-title { font-size: 13px; font-weight: 600; color: #222; margin-bottom: 6px; }
 .advice-role { font-size: 13px; font-weight: 700; color: #1a3a6f; }
-.advice-text { font-size: 13px; color: #444; line-height: 1.7; margin-top: 2px; }
+.advice-text { font-size: 13px; color: #222; line-height: 1.7; margin-top: 2px; }
 .conclusion-section { background: #f0f5ff; border: 1px solid #c8d8f0; border-radius: 6px; padding: 16px; }
-.conclusion-text { font-size: 13px; color: #333; line-height: 1.8; }
-.empty-hint { font-size: 13px; color: #aaa; padding: 10px 0; }
+.conclusion-text { font-size: 13px; color: #111; line-height: 1.8; }
+.empty-hint { font-size: 13px; color: #666; padding: 10px 0; }
+.risk-level-badge { font-size: 14px; font-weight: 700; color: #222; padding: 6px 12px; border-radius: 6px; display: inline-block; margin-bottom: 8px; }
+.compare-table td { padding: 6px 10px; border: 1px solid #dde6f5; color: #222; }
+.compare-table th { background: #1a3a6f; color: #fff; padding: 7px 8px; text-align: center; }
+.risk-item { margin-bottom: 10px; }
+.risk-item-title { font-size: 13px; font-weight: 700; color: #1a3a6f; margin-bottom: 4px; }
+.risk-item-content { font-size: 13px; color: #222; line-height: 1.7; }
 </style>

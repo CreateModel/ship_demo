@@ -408,7 +408,7 @@ function parseIntent(text) {
 async function callQwen(text) {
   const history = chatMessages.value.slice(-8).map(m => ({ role: m.role, content: m.content }))
   const messages = [
-    { role: 'system', content: '你是智能助手。若用户问题与航运系统无关（如讲笑话、闲聊、常识问答），直接正常回答。回答简洁自然。' },
+    { role: 'system', content: '你是航运智能助手。你可以查询实时天气（支持城市、港口、海域），也可以回答航运相关问题或闲聊。查询天气时请直接调用工具获取实时数据，不要编造数据。回答简洁自然。' },
     ...history,
     { role: 'user', content: text }
   ]
